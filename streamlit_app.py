@@ -513,14 +513,27 @@ for stock in cfg["stocks"]:
             if time.time() - last > 600:
                 st.session_state.alerts_sent[sym] = time.time()
                 currency = "£" if sym.endswith(".L") else "$"
-                alerts_triggered.append({
+                alert_entry = {
                     "symbol":    sym,
                     "name":      stock["name"],
                     "price":     price,
                     "change":    change,
                     "threshold": stock["alert_pct"],
                     "currency":  currency,
-                })
+                }
+                alerts_triggered.append(alert_entry)
+
+                # ── AUTO-SEND: fire immediately, no button click needed ────────
+                auto_recipients = cfg["whatsapp"].get("recipients", [])
+                if auto_recipients and WA_AVAILABLE:
+                    id_inst = cfg["whatsapp"].get("id_instance", "").strip()
+                    api_tok = cfg["whatsapp"].get("api_token",   "").strip()
+                    if id_inst and api_tok:
+                        single_msg = build_alert_message([alert_entry])
+                        results    = send_whatsapp_messages(single_msg, auto_recipients)
+                        # Store results in session state so the UI can display them
+                        for name, phone, ok, err in results:
+                            st.session_state.wa_status_msg[phone] = (ok, err, datetime.now())
 
 # ── Alert panel ───────────────────────────────────────────────────────────────
 if alerts_triggered:
@@ -539,10 +552,30 @@ if alerts_triggered:
     alert_msg  = build_alert_message(alerts_triggered)
     recipients = cfg["whatsapp"].get("recipients", [])
 
+    # ── Show auto-send delivery receipts ─────────────────────────────────────
+    # (Populated automatically during the quote-fetch loop above — no click needed)
+    if st.session_state.wa_status_msg:
+        st.markdown("**📬 Auto-send delivery receipts:**")
+        for phone, (ok, err, sent_at) in st.session_state.wa_status_msg.items():
+            name = next(
+                (r["name"] for r in recipients
+                 if r["phone"].replace("+","").replace(" ","").replace("-","")
+                    == phone.replace("+","").replace(" ","").replace("-","")),
+                phone,
+            )
+            ts_str = sent_at.strftime("%H:%M:%S")
+            if ok:
+                st.success(f"✅ Auto-sent to **{name}** ({phone}) at {ts_str}")
+            else:
+                st.error(f"❌ Auto-send failed — **{name}** ({phone}): {err}")
+
+    # ── Manual re-send (fallback / force-resend) ──────────────────────────────
     if recipients and cred_entered and WA_AVAILABLE:
-        if st.button("📲 Send WhatsApp Alerts to All Recipients", type="primary"):
+        if st.button("📲 Re-send Alerts Manually",
+                     help="Alerts are sent automatically on every refresh cycle. Use this to force an immediate re-send."):
             with st.spinner("Sending…"):
                 results = send_whatsapp_messages(alert_msg, recipients)
+            st.session_state.wa_status_msg = {}
             for name, phone, ok, err in results:
                 if ok:
                     st.success(f"✅ Sent to {name} ({phone})")
@@ -551,11 +584,7 @@ if alerts_triggered:
     elif not recipients:
         st.info("💡 Add recipients in the sidebar to enable WhatsApp alerts.")
     elif not cred_entered:
-        st.warning("⚠️ Enter GREEN API credentials in the sidebar to enable sending.")
-
-    # Auto-send if credentials and recipients are ready
-    if recipients and cred_entered and WA_AVAILABLE and auto_refresh:
-        send_whatsapp_messages(alert_msg, recipients)
+        st.warning("⚠️ Enter GREEN API credentials in the sidebar to enable automatic sending.")
 
     with st.expander("📋 Message preview"):
         st.code(alert_msg, language=None)
