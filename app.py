@@ -148,7 +148,7 @@ FINNHUB_BASE = "https://finnhub.io/api/v1"
 DEFAULT_STOCKS = [
     {"symbol": "CSCO",  "name": "Cisco Systems",     "alert_pct": 2.0},
     {"symbol": "GSK",   "name": "GSK plc",            "alert_pct": 2.0},
-    {"symbol": "GOOG","name": "Google",       "alert_pct": 2.0},
+    {"symbol": "BT-A","name": "BT Group plc",       "alert_pct": 2.0},
 ]
 
 # ── Session state ─────────────────────────────────────────────────────────────
