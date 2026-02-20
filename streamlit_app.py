@@ -1,6 +1,6 @@
 """
-StockWatch Pro — Real-time stock price monitor with WhatsApp alerts
-Dependencies: streamlit, requests, pandas, whatsapp-api-client-python, qrcode, Pillow
+StockWatch Pro — Real-time stock monitor with WhatsApp alerts via GREEN API
+pip install streamlit requests pandas whatsapp-api-client-python qrcode Pillow
 """
 
 import streamlit as st
@@ -12,16 +12,17 @@ import pandas as pd
 from datetime import datetime
 from pathlib import Path
 
-# ── Optional WhatsApp imports (graceful if not installed) ─────────────────────
+# ── GREEN API / WhatsApp import ───────────────────────────────────────────────
+# Package: whatsapp-api-client-python  (pip name)
+# Module:  whatsapp_api_client_python  (import name)
 try:
-    from whatsapp import WhatsApp
+    from whatsapp_api_client_python import API as GreenAPI
     WA_AVAILABLE = True
 except ImportError:
     WA_AVAILABLE = False
 
 try:
     import qrcode
-    from PIL import Image
     QR_AVAILABLE = True
 except ImportError:
     QR_AVAILABLE = False
@@ -39,13 +40,13 @@ st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Inter:wght@300;400;600&display=swap');
 :root{--bg:#0a0e1a;--surface:#111827;--border:#1e2d40;--accent:#00d4ff;
-      --green:#00ff88;--red:#ff4466;--yellow:#ffd700;--text:#e2e8f0;--muted:#64748b;}
+      --green:#00ff88;--red:#ff4466;--yellow:#ffd700;--text:#e2e8f0;--muted:#64748b;--wa:#25D366;}
 html,body,[data-testid="stAppViewContainer"]{background:var(--bg)!important;
   color:var(--text)!important;font-family:'Inter',sans-serif;}
 [data-testid="stSidebar"]{background:var(--surface)!important;border-right:1px solid var(--border);}
 h1,h2,h3{font-family:'Space Mono',monospace;}
 .metric-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;
-  padding:20px 24px;position:relative;overflow:hidden;transition:border-color 0.3s;}
+  padding:20px 24px;position:relative;overflow:hidden;transition:border-color 0.3s;margin-bottom:16px;}
 .metric-card:hover{border-color:var(--accent);}
 .metric-card::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;
   background:linear-gradient(90deg,var(--accent),transparent);}
@@ -69,10 +70,14 @@ h1,h2,h3{font-family:'Space Mono',monospace;}
 .alert-box{background:rgba(255,68,102,0.08);border:1px solid var(--red);border-radius:8px;
   padding:12px 16px;margin:8px 0;font-size:0.85rem;}
 .divider{border-top:1px solid var(--border);margin:16px 0;}
-.wa-connected{color:var(--green);font-family:'Space Mono',monospace;font-size:0.8rem;}
-.wa-connecting{color:var(--yellow);font-family:'Space Mono',monospace;font-size:0.8rem;}
-.wa-disconnected{color:var(--red);font-family:'Space Mono',monospace;font-size:0.8rem;}
-.rec-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px 16px;margin:4px 0;}
+.wa-ok{color:var(--green);font-family:'Space Mono',monospace;font-size:0.78rem;}
+.wa-err{color:var(--red);font-family:'Space Mono',monospace;font-size:0.78rem;}
+.info-box{background:rgba(0,212,255,0.06);border:1px solid rgba(0,212,255,0.25);
+  border-radius:8px;padding:14px 18px;margin:8px 0;font-size:0.85rem;line-height:1.7;}
+.rec-card{background:var(--surface);border:1px solid var(--border);border-radius:8px;
+  padding:10px 14px;margin:4px 0;}
+.qr-panel{background:var(--surface);border:2px solid var(--wa);border-radius:16px;
+  padding:24px;text-align:center;max-width:280px;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -88,8 +93,9 @@ DEFAULT_CONFIG = {
         {"symbol": "GOOGL", "name": "Alphabet (Google)", "alert_pct": 2.0},
     ],
     "whatsapp": {
-        "recipients":    [],
-        "wa_session_id": "stockwatch",
+        "id_instance":    "",   # GREEN API Instance ID
+        "api_token":      "",   # GREEN API Token
+        "recipients":     [],   # [{"name": str, "phone": str}]
     },
     "refresh_interval": 60,
 }
@@ -111,13 +117,9 @@ def load_config() -> dict:
 
 
 def serialise_config(cfg: dict) -> dict:
-    """Return a JSON-safe copy of config (strip runtime-only fields)."""
     return {
-        "stocks": cfg["stocks"],
-        "whatsapp": {
-            "recipients":    cfg["whatsapp"]["recipients"],
-            "wa_session_id": cfg["whatsapp"]["wa_session_id"],
-        },
+        "stocks":           cfg["stocks"],
+        "whatsapp":         cfg["whatsapp"],
         "refresh_interval": cfg["refresh_interval"],
     }
 
@@ -127,20 +129,17 @@ def save_config(cfg: dict):
         json.dump(serialise_config(cfg), f, indent=2)
 
 
-# ── Session state bootstrap ───────────────────────────────────────────────────
+# ── Session state ─────────────────────────────────────────────────────────────
 if "config"        not in st.session_state: st.session_state.config        = load_config()
 if "price_history" not in st.session_state: st.session_state.price_history = {}
 if "alerts_sent"   not in st.session_state: st.session_state.alerts_sent   = {}
 if "last_refresh"  not in st.session_state: st.session_state.last_refresh  = None
-if "wa_client"     not in st.session_state: st.session_state.wa_client     = None
-if "wa_qr_image"   not in st.session_state: st.session_state.wa_qr_image   = None
-if "wa_connected"  not in st.session_state: st.session_state.wa_connected  = False
-if "wa_connecting" not in st.session_state: st.session_state.wa_connecting = False
 if "save_msg"      not in st.session_state: st.session_state.save_msg      = ""
+if "wa_status_msg" not in st.session_state: st.session_state.wa_status_msg = {}  # {phone: (ok, msg)}
 
-cfg = st.session_state.config   # convenient alias
+cfg = st.session_state.config
 
-# ── Finnhub helpers ───────────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
 @st.cache_data(ttl=30)
 def get_quote(symbol: str) -> dict:
     try:
@@ -159,7 +158,12 @@ def pct_change(current: float, reference: float) -> float:
     return 0.0 if reference == 0 else ((current - reference) / reference) * 100
 
 
-# ── Alert message ─────────────────────────────────────────────────────────────
+def fmt_phone_for_greenapi(phone: str) -> str:
+    """Convert +447700900000 → 447700900000@c.us"""
+    clean = phone.replace("+", "").replace(" ", "").replace("-", "")
+    return f"{clean}@c.us"
+
+
 def build_alert_message(alerts: list) -> str:
     lines = ["🚨 *StockWatch Pro Alert*\n"]
     for a in alerts:
@@ -174,45 +178,76 @@ def build_alert_message(alerts: list) -> str:
     return "\n\n".join(lines)
 
 
-# ── WhatsApp helpers ──────────────────────────────────────────────────────────
-def send_whatsapp_alerts(message: str, recipients: list) -> list:
-    results = []
-    client = st.session_state.wa_client
-    if not client or not st.session_state.wa_connected:
-        return [("—", "—", False, "WhatsApp not connected")]
-    for rec in recipients:
-        phone = rec["phone"].replace("+", "").replace(" ", "").replace("-", "")
-        try:
-            client.send_message(phone, message)
-            results.append((rec["name"], phone, True, ""))
-        except Exception as e:
-            results.append((rec["name"], phone, False, str(e)))
-    return results
+def get_green_api_client():
+    """Return a configured GreenAPI client, or None if credentials missing."""
+    id_inst  = cfg["whatsapp"].get("id_instance", "").strip()
+    api_tok  = cfg["whatsapp"].get("api_token",   "").strip()
+    if not id_inst or not api_tok or not WA_AVAILABLE:
+        return None
+    return GreenAPI.GreenAPI(id_inst, api_tok)
 
 
-def init_wa_client(session_id: str):
-    if not WA_AVAILABLE:
-        st.error("whatsapp-api-client-python not installed.")
-        return
-
-    def on_qr(qr_data: str):
-        if QR_AVAILABLE:
-            img = qrcode.make(qr_data)
-            st.session_state.wa_qr_image = img
-        st.session_state.wa_connecting = True
-        st.session_state.wa_connected  = False
-
-    def on_ready():
-        st.session_state.wa_connected  = True
-        st.session_state.wa_connecting = False
-        st.session_state.wa_qr_image   = None
-
+def get_qr_from_greenapi() -> bytes | None:
+    """
+    Call GREEN API's QR endpoint and return PNG bytes, or None on failure.
+    Endpoint: GET /waInstance{id}/qr/{token}
+    """
+    id_inst = cfg["whatsapp"].get("id_instance", "").strip()
+    api_tok = cfg["whatsapp"].get("api_token",   "").strip()
+    if not id_inst or not api_tok:
+        return None
     try:
-        client = WhatsApp(session=session_id, on_qr=on_qr, on_ready=on_ready)
-        st.session_state.wa_client    = client
-        st.session_state.wa_connecting = True
-    except Exception as e:
-        st.error(f"WhatsApp init error: {e}")
+        url = f"https://api.green-api.com/waInstance{id_inst}/qr/{api_tok}"
+        r = requests.get(url, timeout=10)
+        data = r.json()
+        # Response: {"type": "qrCode", "message": "<base64>"}
+        # or       {"type": "alreadyLogged", ...}
+        # or       {"type": "alreadyLogged", ...}
+        if data.get("type") == "qrCode" and QR_AVAILABLE:
+            import base64
+            qr_b64 = data["message"]
+            png_bytes = base64.b64decode(qr_b64)
+            return png_bytes
+        elif data.get("type") in ("alreadyLogged", "accountDeleted"):
+            return data.get("type")  # sentinel string
+    except Exception:
+        pass
+    return None
+
+
+def check_greenapi_state() -> str:
+    """Return GREEN API account state: 'authorized', 'notAuthorized', or 'error'."""
+    id_inst = cfg["whatsapp"].get("id_instance", "").strip()
+    api_tok = cfg["whatsapp"].get("api_token",   "").strip()
+    if not id_inst or not api_tok:
+        return "no_credentials"
+    try:
+        url = f"https://api.green-api.com/waInstance{id_inst}/getStateInstance/{api_tok}"
+        r = requests.get(url, timeout=8)
+        state = r.json().get("stateInstance", "error")
+        return state
+    except Exception:
+        return "error"
+
+
+def send_whatsapp_messages(message: str, recipients: list) -> list:
+    """Send message to all recipients. Returns list of (name, phone, ok, error)."""
+    client = get_green_api_client()
+    if client is None:
+        return [(r["name"], r["phone"], False, "Client not configured") for r in recipients]
+
+    results = []
+    for rec in recipients:
+        chat_id = fmt_phone_for_greenapi(rec["phone"])
+        try:
+            resp = client.sending.sendMessage(chat_id, message)
+            if resp.code == 200:
+                results.append((rec["name"], rec["phone"], True, ""))
+            else:
+                results.append((rec["name"], rec["phone"], False, f"HTTP {resp.code}"))
+        except Exception as e:
+            results.append((rec["name"], rec["phone"], False, str(e)))
+    return results
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -224,7 +259,6 @@ with st.sidebar:
 
     # ── Config persistence ────────────────────────────────────────────────────
     st.markdown("### 💾 Config File")
-
     col_sv, col_rl = st.columns(2)
     with col_sv:
         if st.button("💾 Save", use_container_width=True):
@@ -236,21 +270,14 @@ with st.sidebar:
             cfg = st.session_state.config
             st.session_state.save_msg = f"Reloaded {datetime.now().strftime('%H:%M:%S')}"
             st.rerun()
-
     if st.session_state.save_msg:
         st.caption(f"✅ {st.session_state.save_msg}")
 
-    # Download JSON
     cfg_json = json.dumps(serialise_config(cfg), indent=2)
-    st.download_button(
-        "⬇️ Download config.json",
-        data=cfg_json,
-        file_name="stockwatch_config.json",
-        mime="application/json",
-        use_container_width=True,
-    )
+    st.download_button("⬇️ Download config.json", data=cfg_json,
+                       file_name="stockwatch_config.json", mime="application/json",
+                       use_container_width=True)
 
-    # Upload JSON
     uploaded = st.file_uploader("⬆️ Upload config.json", type="json", label_visibility="collapsed")
     if uploaded:
         try:
@@ -268,56 +295,58 @@ with st.sidebar:
 
     st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
-    # ── WhatsApp connection ───────────────────────────────────────────────────
-    st.markdown("### 📱 WhatsApp")
+    # ── GREEN API credentials ─────────────────────────────────────────────────
+    st.markdown("### 📱 WhatsApp (GREEN API)")
 
-    if st.session_state.wa_connected:
-        st.markdown('<span class="wa-connected">● CONNECTED</span>', unsafe_allow_html=True)
-    elif st.session_state.wa_connecting:
-        st.markdown('<span class="wa-connecting">⏳ AWAITING QR SCAN…</span>', unsafe_allow_html=True)
-    else:
-        st.markdown('<span class="wa-disconnected">● NOT CONNECTED</span>', unsafe_allow_html=True)
-
-    session_id = st.text_input(
-        "Session name",
-        value=cfg["whatsapp"].get("wa_session_id", "stockwatch"),
-        help="Reuse the same name to restore a previously-authorised session without re-scanning.",
+    id_inst = st.text_input(
+        "Instance ID",
+        value=cfg["whatsapp"].get("id_instance", ""),
+        placeholder="e.g. 1101000001",
+        type="default",
     )
-    cfg["whatsapp"]["wa_session_id"] = session_id
+    api_tok = st.text_input(
+        "API Token",
+        value=cfg["whatsapp"].get("api_token", ""),
+        placeholder="e.g. d75b3a66374942c5b3c...",
+        type="password",
+    )
+    cfg["whatsapp"]["id_instance"] = id_inst.strip()
+    cfg["whatsapp"]["api_token"]   = api_tok.strip()
 
-    cc, dc = st.columns(2)
-    with cc:
-        if st.button("🔗 Connect", use_container_width=True, disabled=st.session_state.wa_connected):
-            init_wa_client(session_id)
-            st.rerun()
-    with dc:
-        if st.button("✂️ Disconnect", use_container_width=True, disabled=not st.session_state.wa_connected):
-            st.session_state.wa_client    = None
-            st.session_state.wa_connected = False
-            st.session_state.wa_connecting = False
-            st.session_state.wa_qr_image  = None
-            st.rerun()
+    cred_ok = bool(id_inst.strip() and api_tok.strip())
+
+    if st.button("🔍 Check Connection Status", use_container_width=True, disabled=not cred_ok):
+        with st.spinner("Checking..."):
+            state = check_greenapi_state()
+        if state == "authorized":
+            st.success("✅ WhatsApp authorised & ready")
+        elif state == "notAuthorized":
+            st.warning("⚠️ Not authorised — scan the QR in the main panel")
+        elif state == "no_credentials":
+            st.error("Enter Instance ID and API Token first")
+        else:
+            st.error(f"Error checking state: {state}")
 
     if not WA_AVAILABLE:
-        st.warning("Install: `pip install whatsapp-api-client-python qrcode Pillow`")
+        st.error("❌ Package missing — run:\n```\npip install whatsapp-api-client-python\n```")
 
     st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
     # ── Recipients ────────────────────────────────────────────────────────────
     st.markdown("### 👥 Alert Recipients")
-
     recipients = cfg["whatsapp"].setdefault("recipients", [])
-    to_del_rec = []
+
+    to_del = []
     for ri, rec in enumerate(recipients):
         rc1, rc2 = st.columns([4, 1])
         with rc1:
             st.markdown(f"**{rec['name']}**  \n`{rec['phone']}`")
         with rc2:
             if st.button("✕", key=f"rdel_{ri}"):
-                to_del_rec.append(ri)
-    for i in sorted(to_del_rec, reverse=True):
+                to_del.append(ri)
+    for i in sorted(to_del, reverse=True):
         recipients.pop(i)
-    if to_del_rec:
+    if to_del:
         st.rerun()
 
     with st.form("add_rec", clear_on_submit=True):
@@ -396,14 +425,13 @@ with st.sidebar:
 #  MAIN PANEL
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# Header
 st.markdown("""
 <div class="header-band">
   <span style="font-size:2.2rem">📈</span>
   <div>
     <h1 style="margin:0;font-size:1.8rem;color:#00d4ff">STOCKWATCH PRO</h1>
     <span style="color:#64748b;font-size:0.8rem;font-family:'Space Mono',monospace">
-      REAL-TIME PRICE MONITOR · FINNHUB · WHATSAPP ALERTS
+      REAL-TIME PRICE MONITOR · FINNHUB · WHATSAPP ALERTS VIA GREEN API
     </span>
   </div>
 </div>
@@ -412,35 +440,54 @@ st.markdown("""
 ts = st.session_state.last_refresh or datetime.now()
 st.caption(f"Last data: {ts.strftime('%Y-%m-%d %H:%M:%S')} UTC  |  Finnhub free tier ~15 min delay")
 
-# ── QR Code panel ─────────────────────────────────────────────────────────────
-if st.session_state.wa_connecting and not st.session_state.wa_connected:
-    st.markdown("---")
-    qcol, icol = st.columns([1, 2])
-    with qcol:
-        st.markdown("### 📲 Scan to Connect")
-        if st.session_state.wa_qr_image and QR_AVAILABLE:
-            buf = io.BytesIO()
-            st.session_state.wa_qr_image.save(buf, format="PNG")
-            st.image(buf.getvalue(), caption="Scan with WhatsApp", width=220)
-        else:
-            st.info("QR code loading…\n\nEnsure `qrcode` and `Pillow` are installed.")
-    with icol:
-        st.markdown("### How to link your phone")
-        st.markdown("""
-1. Open **WhatsApp** on your phone
-2. Tap **⋮** (Android) or **Settings** (iPhone)
-3. Select **Linked Devices** → **Link a Device**
-4. Point your camera at the QR code
-5. The status above will show **● CONNECTED**
+# ── WhatsApp / GREEN API setup panel ─────────────────────────────────────────
+cred_entered = bool(
+    cfg["whatsapp"].get("id_instance", "").strip() and
+    cfg["whatsapp"].get("api_token",   "").strip()
+)
 
-> The session is saved locally under the **session name** you set.
-> On next startup, if you use the same name, you may not need to re-scan.
-        """)
-        if st.button("🔄 Refresh QR"):
-            st.rerun()
+if not cred_entered:
+    st.markdown("---")
+    st.markdown("""
+    <div class="info-box">
+    <b>📱 WhatsApp setup required</b><br>
+    This app sends alerts via <b>GREEN API</b> — a free WhatsApp gateway. To set it up:<br><br>
+    1. Register at <a href="https://console.green-api.com" target="_blank" style="color:#00d4ff">console.green-api.com</a> (free Developer plan available)<br>
+    2. Create an instance — you'll receive an <b>Instance ID</b> and <b>API Token</b><br>
+    3. In the GREEN API console, click <b>Scan QR code</b> and scan with your WhatsApp app<br>
+    4. Enter your Instance ID and API Token in the sidebar<br>
+    5. Add recipient phone numbers in the sidebar<br><br>
+    Once authorised, alerts are sent automatically when price thresholds are breached.
+    </div>
+    """, unsafe_allow_html=True)
     st.markdown("---")
 
-# ── Fetch quotes ──────────────────────────────────────────────────────────────
+# ── QR code display (for initial auth or re-auth) ─────────────────────────────
+if cred_entered:
+    with st.expander("📲 Show WhatsApp QR code (scan if not yet authorised)", expanded=False):
+        qr_col, inst_col = st.columns([1, 2])
+        with qr_col:
+            if st.button("🔄 Fetch QR from GREEN API"):
+                with st.spinner("Fetching QR…"):
+                    result = get_qr_from_greenapi()
+                if result == "alreadyLogged":
+                    st.success("✅ Already authorised — no QR needed.")
+                elif isinstance(result, bytes):
+                    st.image(result, caption="Scan with WhatsApp", width=220)
+                else:
+                    st.warning("Could not fetch QR. Check your credentials or try the GREEN API console directly.")
+        with inst_col:
+            st.markdown("""
+**How to link your WhatsApp:**
+1. Open WhatsApp on your phone
+2. Tap ⋮ Menu → **Linked Devices** → **Link a Device**
+3. Click **Fetch QR** on the left and scan the code
+4. Status will show **authorised** in the console
+
+> You can also scan directly in the [GREEN API console](https://console.green-api.com) — both routes work.
+            """)
+
+# ── Fetch quotes & detect alerts ──────────────────────────────────────────────
 quotes           = {}
 alerts_triggered = []
 
@@ -475,10 +522,11 @@ for stock in cfg["stocks"]:
                     "currency":  currency,
                 })
 
-# ── Alerts panel ──────────────────────────────────────────────────────────────
+# ── Alert panel ───────────────────────────────────────────────────────────────
 if alerts_triggered:
     st.markdown("---")
-    st.markdown("### 🚨 Price Alerts")
+    st.markdown("### 🚨 Price Alerts Triggered")
+
     for a in alerts_triggered:
         direction = "⬆️ UP" if a["change"] > 0 else "⬇️ DOWN"
         st.markdown(
@@ -491,19 +539,23 @@ if alerts_triggered:
     alert_msg  = build_alert_message(alerts_triggered)
     recipients = cfg["whatsapp"].get("recipients", [])
 
-    if recipients:
-        if st.session_state.wa_connected and WA_AVAILABLE:
-            if st.button("📲 Send WhatsApp Alerts to All Recipients", type="primary"):
-                results = send_whatsapp_alerts(alert_msg, recipients)
-                for name, phone, ok, err in results:
-                    if ok:
-                        st.success(f"✅ Sent to {name} ({phone})")
-                    else:
-                        st.error(f"❌ Failed — {name} ({phone}): {err}")
-        else:
-            st.warning("⚠️ WhatsApp not connected. Use the sidebar to connect and scan the QR code.")
-    else:
+    if recipients and cred_entered and WA_AVAILABLE:
+        if st.button("📲 Send WhatsApp Alerts to All Recipients", type="primary"):
+            with st.spinner("Sending…"):
+                results = send_whatsapp_messages(alert_msg, recipients)
+            for name, phone, ok, err in results:
+                if ok:
+                    st.success(f"✅ Sent to {name} ({phone})")
+                else:
+                    st.error(f"❌ Failed — {name} ({phone}): {err}")
+    elif not recipients:
         st.info("💡 Add recipients in the sidebar to enable WhatsApp alerts.")
+    elif not cred_entered:
+        st.warning("⚠️ Enter GREEN API credentials in the sidebar to enable sending.")
+
+    # Auto-send if credentials and recipients are ready
+    if recipients and cred_entered and WA_AVAILABLE and auto_refresh:
+        send_whatsapp_messages(alert_msg, recipients)
 
     with st.expander("📋 Message preview"):
         st.code(alert_msg, language=None)
@@ -580,17 +632,21 @@ if any(st.session_state.price_history.values()):
         max_len = max(len(v) for v in st.session_state.price_history.values())
         for sym, hist in st.session_state.price_history.items():
             df_data[sym] = [None] * (max_len - len(hist)) + hist
-        if df_data:
-            df = pd.DataFrame(df_data)
-            df.index = range(1, len(df) + 1)
-            df.index.name = "Tick"
-            st.line_chart(df)
-            st.dataframe(df.tail(20).style.format(lambda x: f"{x:.3f}" if x is not None else "—"),
-                         use_container_width=True)
+        df = pd.DataFrame(df_data)
+        df.index = range(1, len(df) + 1)
+        df.index.name = "Tick"
+        st.line_chart(df)
+        st.dataframe(
+            df.tail(20).style.format(lambda x: f"{x:.3f}" if x is not None else "—"),
+            use_container_width=True,
+        )
 
-# ── Debug / config viewer ─────────────────────────────────────────────────────
+# ── Config / debug ────────────────────────────────────────────────────────────
 with st.expander("🛠️ Current config (JSON)"):
-    st.json(serialise_config(cfg))
+    # Don't show the API token in plain text in the UI
+    safe_cfg = serialise_config(cfg)
+    safe_cfg["whatsapp"] = {**safe_cfg["whatsapp"], "api_token": "••••••••" if safe_cfg["whatsapp"].get("api_token") else ""}
+    st.json(safe_cfg)
 
 with st.expander("🔍 Raw Finnhub API response"):
     st.json(quotes)
